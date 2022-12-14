@@ -5,39 +5,17 @@
 #include <sys/time.h>
 #include <cuda_runtime.h>
 
-const int RPT = 64;
-const int NUMTHR = 512;
-
-#define CHECK(call)                                                                       \
-{                                                                                     \
-    const cudaError_t err = call;                                                     \
-    if (err != cudaSuccess)                                                           \
-    {                                                                                 \
-        printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__); \
-        exit(EXIT_FAILURE);                                                           \
-    }                                                                                 \
-}
-
-#define CHECK_KERNELCALL()                                                                \
-{                                                                                     \
-    const cudaError_t err = cudaGetLastError();                                       \
-    if (err != cudaSuccess)                                                           \
-    {                                                                                 \
-        printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__); \
-        exit(EXIT_FAILURE);                                                           \
-    }                                                                                 \
-}
-
 double get_time() // function to get the time of day in seconds
 {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return tv.tv_sec + tv.tv_usec * 1e-6;
 }
- 
+
 // Reads a sparse matrix and represents it using CSR (Compressed Sparse Row) format
 void read_matrix(int **row_ptr, int **col_ind, float **values, float **matrixDiagonal, const char *filename, int *num_rows, int *num_cols, int *num_vals)
 {
+    int err;
     FILE *file = fopen(filename, "r");
     if (file == NULL)
     {
@@ -158,11 +136,11 @@ void symgs_csr_sw(const int *row_ptr, const int *col_ind, const float *values, c
     }
 }
 
-
 //implementation of the first part of the algorithm
-__global__ void forwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, bool *modified, float *matrixDiagonal)
+__global__ void forwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *y, float *matrixDiagonal)
 {
     const int row = blockIdx.x*blockDim.x + threadIdx.x;
+    
     if(row<num_rows){    
         float tmp = x[row];
         const int row_start = row_ptr[row];
@@ -172,72 +150,43 @@ __global__ void forwardSweep(const int *row_ptr, const int *col_ind, const float
             tmp -= values[col]*x[col_ind[col]];
         }
 
-        tmp = (tmp + (x[row] * matrixDiagonal[row])) / matrixDiagonal[row];
-        x[row] = tmp;
+        tmp += x[row] * matrixDiagonal[row];
+        y[row] = tmp / matrixDiagonal[row];
     }
-    //printf("fine thread #%d\n", (blockIdx.x*blockDim.x + threadIdx.x));
 }
 
-//da pensare come ottimizzare
-__global__ void backwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, bool *modified, float *matrixDiagonal)
+//implementation of the second part of the algorithm
+__global__ void backwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *y, float *matrixDiagonal)
 {
-    const int row1 = num_rows - 1 - (blockIdx.x*blockDim.x + threadIdx.x)*RPT;
-    const int rowEnd = row1 + RPT;
-    if(row1>=0 && rowEnd<num_rows){
-        int row = 0;
-        for(row = rowEnd; row>=row1; row--){
-            float tmp = x[row];
-            const int row_start = row_ptr[row];
-            const int row_end = row_ptr[row+1];
-            bool process = true;
-
-            for(int col = row_start; col < row_end; col++){
-                while(process){
-                    if(modified[col_ind[col]]==true || col_ind[col]<=row){
-                        tmp -= values[col]*x[col_ind[col]];
-                        process = false;
-                    }
-                }
-                process = true;
-            }
-
-            process = true;
+    
+    const int row = num_rows - 1 - (blockIdx.x*blockDim.x + threadIdx.x);
+    if(row>num_rows - 10){
+        printf("%d\n", row);
+    }
+    if(row<num_rows && row>=0){
+        float tmp = y[row];
+        const int row_start = row_ptr[row];
+        const int row_end = row_ptr[row+1];
+        bool process = true;
+        for(int col = row_start; col < row_end; col++){
             while(process){
-                if(row == (num_rows-1) || modified[row+1]==true){
-                    tmp += x[row] * matrixDiagonal[row];
-                    x[row] = tmp / matrixDiagonal[row];
-                    modified[row] = true;
+                if(x[col_ind[col]]!=0 || col_ind[col]<=row){
+                    tmp -= values[col]*y[col_ind[col]];
                     process = false;
                 }
             }
+            process = true;
         }
+        tmp += y[row] * matrixDiagonal[row];
+        y[row] = tmp / matrixDiagonal[row];
+        x[row]++;
     }
-    printf("fine thread #%d\n", (blockIdx.x*blockDim.x + threadIdx.x));
+    
 }
-
-
-// GPU implementation of SYMGS using CSR
-/**
- * @brief 
- * 
- * @param row_ptr pointer to row starts in col_ind and data + last item = to muber of values
- * @param col_ind array of column indeces
- * @param values array of corresponding nonzero values
- * @param num_rows number of rows
- * @param x vector to multiply for
- * @param matrixDiagonal vector of diagonal values
- * @return __global__ 
- */
-/*
-__global__ void symgsGPU(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *y, float *matrixDiagonal)
-{
-    //forwardSweep
-    forwardSweep(row_ptr, col_ind, values, num_rows, x, y, matrixDiagonal);
-}*/
-
 
 int main(int argc, const char *argv[])
 {
+
     if (argc != 2)
     {
         printf("Usage: ./exec matrix_file");
@@ -256,64 +205,60 @@ int main(int argc, const char *argv[])
     //lettuta matrice e inizializzazione variabili
     read_matrix(&row_ptr, &col_ind, &values, &matrixDiagonal, filename, &num_rows, &num_cols, &num_vals);
     float *x = (float *)malloc(num_rows * sizeof(float));
-    printf("END reading matrix\n");
+
     //Generate a random vector
     srand(time(NULL));
     for (int i = 0; i < num_rows; i++)
     {
         x[i] = (rand() % 100) / (rand() % 100 + 1); // the number we use to divide cannot be 0, that's the reason of the +1
     }
-    
-    printf("X generated\n");
 
     //GPU vaiables
     int *d_row_ptr, *d_col_ind;
     float *d_values;
     float *d_matrixDiagonal;
-    float *d_x;
-    bool  *d_modified;
- 
+    float *d_x, *d_y;
+
     //allocazione memoria per vettori su gpu
-    CHECK(cudaMalloc(&d_row_ptr, (num_rows + 1) * sizeof(int)));
-    CHECK(cudaMalloc(&d_col_ind, num_vals * sizeof(int)));
-    CHECK(cudaMalloc(&d_values, num_vals * sizeof(float)));
-    CHECK(cudaMalloc(&d_matrixDiagonal, num_rows * sizeof(float)));
-    CHECK(cudaMalloc(&d_x, num_rows * sizeof(float)));
-    CHECK(cudaMalloc(&d_modified, num_rows * sizeof(bool)));
+    cudaMalloc(&d_row_ptr, (num_rows + 1) * sizeof(int));
+    cudaMalloc(&d_col_ind, num_vals * sizeof(int));
+    cudaMalloc(&d_values, num_vals * sizeof(float));
+    cudaMalloc(&d_matrixDiagonal, num_rows * sizeof(float));
+    cudaMalloc(&d_x, num_rows * sizeof(float));
+    cudaMalloc(&d_y, num_rows * sizeof(float));
 
     //copia e inizializzazione vettori su gpu
-    CHECK(cudaMemcpy(d_row_ptr, row_ptr,  (num_rows + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(d_col_ind, col_ind,  num_vals * sizeof(int), cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(d_values, values,  num_vals * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(d_matrixDiagonal, matrixDiagonal,  num_rows * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(d_x, x,  num_rows * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK(cudaMemset(d_modified, 0, num_rows * sizeof(double)));
+    cudaMemcpy(d_row_ptr, row_ptr,  (num_rows + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_col_ind, col_ind,  num_vals * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_values, values,  num_vals * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_matrixDiagonal, matrixDiagonal,  num_rows * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, x,  num_rows * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemset(d_y, 0, num_rows * sizeof(float));
 
-    printf("GPU START\n");
     start_time = get_time();
-    dim3 blocksPerGrid(num_rows/(NUMTHR*RPT), 1, 1);
-    dim3 ThreadsPerBlock(NUMTHR, 1, 1);
-    forwardSweep<<<blocksPerGrid, ThreadsPerBlock>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_modified, d_matrixDiagonal);
-    CHECK_KERNELCALL();
+    dim3 blocksPerGrid(num_rows/1024, 1, 1);
+    dim3 ThreadsPerBlock(1024, 1, 1);
+    forwardSweep<<<blocksPerGrid, ThreadsPerBlock>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_y, d_matrixDiagonal);
     cudaDeviceSynchronize();
-    backwardSweep<<<blocksPerGrid, ThreadsPerBlock>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_modified, d_matrixDiagonal);
-    CHECK_KERNELCALL();
+    cudaMemset(d_x, 0, num_rows * sizeof(float));
+    backwardSweep<<<blocksPerGrid, ThreadsPerBlock>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_y, d_matrixDiagonal);
     cudaDeviceSynchronize();
     end_time = get_time();
     printf("SYMGS Time GPU: %.10lf\n", end_time - start_time);
 
     //creo vettore di supporto per il testing e copio il risultato della gpu
     float *y = (float *)malloc(num_rows * sizeof(float));
-    cudaMemcpy(y, d_x,  num_rows * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(y, d_y,  num_rows * sizeof(float), cudaMemcpyDeviceToHost);
 
     cudaFree(d_row_ptr);
     cudaFree(d_col_ind);
     cudaFree(d_values);
     cudaFree(d_matrixDiagonal);
     cudaFree(d_x);
-    cudaFree(d_modified);
+    cudaFree(d_y);
 
     // Compute in sw
+    printf("inizio cpu\n");
     start_time = get_time();
     symgs_csr_sw(row_ptr, col_ind, values, num_rows, x, matrixDiagonal);
     end_time = get_time();
@@ -321,19 +266,12 @@ int main(int argc, const char *argv[])
     // Print time
     printf("SYMGS Time CPU: %.10lf\n", end_time - start_time);
 
-    bool correct = true;
-    int i = 0;
-    for(i = 0; i<num_rows && correct; i++){
-        correct = (y[i] == x[i]);
+    for(int i = 0; i<30; i++){
+        if(y[i] - x[i] != 0){
+            printf("error at %d. Val x = %.8f, Val y = %.8f , offset = %.8f\n", i, x[i], y[i], y[i] - x[i]);
+        }
     }
 
-    if(correct){
-        printf("Yeeeee\n");
-    }else{
-        printf("fail\n");
-        printf("error at %d. Val x = %f, Val y = %f \n", i-1, x[i-1], y[i-1]);
-    }
-   
     free(row_ptr);
     free(col_ind);
     free(values);

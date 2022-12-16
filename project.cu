@@ -5,7 +5,7 @@
 #include <sys/time.h>
 #include <cuda_runtime.h>
 
-const int RPT = 64;
+const int RPT = 16;
 const int NUMTHR = 512;
 
 #define CHECK(call)                                                                       \
@@ -17,7 +17,7 @@ const int NUMTHR = 512;
         exit(EXIT_FAILURE);                                                           \
     }                                                                                 \
 }
-
+ 
 #define CHECK_KERNELCALL()                                                                \
 {                                                                                     \
     const cudaError_t err = cudaGetLastError();                                       \
@@ -158,48 +158,41 @@ void symgs_csr_sw(const int *row_ptr, const int *col_ind, const float *values, c
     }
 }
 
-
 //implementation of the first part of the algorithm
-__global__ void forwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, bool *modified, float *matrixDiagonal)
+__global__ void forwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *y, bool *modified, float *matrixDiagonal)
 {
     const int row1 = (blockIdx.x*blockDim.x + threadIdx.x)*RPT;
     const int rowLast = row1 + RPT;
 
     if(row1>=0 && row1<num_rows){
         for(int row = row1; row < rowLast && row<num_rows; row++){
-            printf("Riga eseguita: %d\n", row);
-
             float tmp = x[row];
             const int row_start = row_ptr[row];
             const int row_end = row_ptr[row+1];
-            bool process = true;
+            bool process;
 
             for(int col = row_start; col < row_end; col++){
+                process = true;
                 while(process){
-                    if(modified[col_ind[col]]==true || col_ind[col]<=row){
+                    if(col_ind[col]>=row){
                         tmp -= values[col]*x[col_ind[col]];
+                        process = false;
+                    }else if(modified[col_ind[col]]==true){
+                        tmp -= values[col]*y[col_ind[col]];
                         process = false;
                     }
                 }
-                process = true;
             }
-
-            process = true;
-            while(process){
-                if(row == (num_rows-1) || modified[row+1]==true){
-                    tmp += x[row] * matrixDiagonal[row];
-                    x[row] = tmp / matrixDiagonal[row];
-                    modified[row] = true;
-                    process = false;
-                }
-            }
+            tmp += x[row] * matrixDiagonal[row];
+            y[row] = tmp / matrixDiagonal[row];
+            modified[row] = true;
         }
     }
-    printf("fine thread #%d\n", (blockIdx.x*blockDim.x + threadIdx.x));
+    //printf("fine thread #%d\n", (blockIdx.x*blockDim.x + threadIdx.x));
 }
 
 //da pensare come ottimizzare
-__global__ void backwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, bool *modified, float *matrixDiagonal)
+__global__ void backwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *y, bool *modified, float *matrixDiagonal)
 {
     const int row1 = num_rows - 1 - (blockIdx.x*blockDim.x + threadIdx.x)*RPT;
     const int rowLast = row1 + RPT;
@@ -214,47 +207,22 @@ __global__ void backwardSweep(const int *row_ptr, const int *col_ind, const floa
             for(int col = row_start; col < row_end; col++){
                 process = true;
                 while(process){
-                    if(modified[col_ind[col]]==true || col_ind[col]<=row){
+                    if(col_ind[col]<=row){
+                        tmp -= values[col]*y[col_ind[col]];
+                        process = false;
+                    }else if(modified[col_ind[col]]==false){
                         tmp -= values[col]*x[col_ind[col]];
                         process = false;
                     }
                 }
             }
-
-            process = true;
-            while(process){
-                if(row == 0 || modified[row+1]==true){
-                    tmp += x[row] * matrixDiagonal[row];
-                    x[row] = tmp / matrixDiagonal[row];
-                    modified[row] = true;
-                    process = false;
-                }
-            }
+            tmp += y[row] * matrixDiagonal[row];
+            x[row] = tmp / matrixDiagonal[row];
+            modified[row] = false;
         }
     }
-    printf("fine thread #%d\n", (blockIdx.x*blockDim.x + threadIdx.x));
+    //printf("fine thread #%d\n", (blockIdx.x*blockDim.x + threadIdx.x));
 }
-
-
-// GPU implementation of SYMGS using CSR
-/**
- * @brief 
- * 
- * @param row_ptr pointer to row starts in col_ind and data + last item = to muber of values
- * @param col_ind array of column indeces
- * @param values array of corresponding nonzero values
- * @param num_rows number of rows
- * @param x vector to multiply for
- * @param matrixDiagonal vector of diagonal values
- * @return __global__ 
- */
-/*
-__global__ void symgsGPU(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *y, float *matrixDiagonal)
-{
-    //forwardSweep
-    forwardSweep(row_ptr, col_ind, values, num_rows, x, y, matrixDiagonal);
-}*/
-
 
 int main(int argc, const char *argv[])
 {
@@ -290,7 +258,7 @@ int main(int argc, const char *argv[])
     int *d_row_ptr, *d_col_ind;
     float *d_values;
     float *d_matrixDiagonal;
-    float *d_x;
+    float *d_x, *d_y;
     bool  *d_modified;
  
     //allocazione memoria per vettori su gpu
@@ -299,6 +267,7 @@ int main(int argc, const char *argv[])
     CHECK(cudaMalloc(&d_values, num_vals * sizeof(float)));
     CHECK(cudaMalloc(&d_matrixDiagonal, num_rows * sizeof(float)));
     CHECK(cudaMalloc(&d_x, num_rows * sizeof(float)));
+    CHECK(cudaMalloc(&d_y, num_rows * sizeof(float)));
     CHECK(cudaMalloc(&d_modified, num_rows * sizeof(bool)));
 
     //copia e inizializzazione vettori su gpu
@@ -307,16 +276,15 @@ int main(int argc, const char *argv[])
     CHECK(cudaMemcpy(d_values, values,  num_vals * sizeof(float), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_matrixDiagonal, matrixDiagonal,  num_rows * sizeof(float), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_x, x,  num_rows * sizeof(float), cudaMemcpyHostToDevice));
-//    CHECK(cudaMemset(d_modified, 0, num_rows * sizeof(double)));
 
     printf("GPU START\n");
     start_time = get_time();
     dim3 blocksPerGrid(num_rows/(NUMTHR*RPT), 1, 1);
     dim3 ThreadsPerBlock(NUMTHR, 1, 1);
-    forwardSweep<<<blocksPerGrid, ThreadsPerBlock>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_modified, d_matrixDiagonal);
+    forwardSweep<<<blocksPerGrid, ThreadsPerBlock>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_y, d_modified, d_matrixDiagonal);
     CHECK_KERNELCALL();
     cudaDeviceSynchronize();
-    backwardSweep<<<blocksPerGrid, ThreadsPerBlock>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_modified, d_matrixDiagonal);
+    backwardSweep<<<blocksPerGrid, ThreadsPerBlock>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_y, d_modified, d_matrixDiagonal);
     CHECK_KERNELCALL();
     cudaDeviceSynchronize();
     end_time = get_time();
@@ -331,6 +299,7 @@ int main(int argc, const char *argv[])
     cudaFree(d_values);
     cudaFree(d_matrixDiagonal);
     cudaFree(d_x);
+    cudaFree(d_y);
     cudaFree(d_modified);
 
     // Compute in sw
@@ -348,7 +317,7 @@ int main(int argc, const char *argv[])
     }
 
     if(correct){
-        printf("Yeeeee\n");
+        printf("win\n");
     }else{
         printf("fail\n");
         printf("error at %d. Val x = %f, Val y = %f \n", i-1, x[i-1], y[i-1]);

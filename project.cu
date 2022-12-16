@@ -162,30 +162,13 @@ void symgs_csr_sw(const int *row_ptr, const int *col_ind, const float *values, c
 //implementation of the first part of the algorithm
 __global__ void forwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, bool *modified, float *matrixDiagonal)
 {
-    const int row = blockIdx.x*blockDim.x + threadIdx.x;
-    if(row<num_rows){    
-        float tmp = x[row];
-        const int row_start = row_ptr[row];
-        const int row_end = row_ptr[row+1];
+    const int row1 = (blockIdx.x*blockDim.x + threadIdx.x)*RPT;
+    const int rowLast = row1 + RPT;
 
-        for(int col = row_start; col < row_end; col++){
-            tmp -= values[col]*x[col_ind[col]];
-        }
+    if(row1>=0 && row1<num_rows){
+        for(int row = row1; row < rowLast && row<num_rows; row++){
+            printf("Riga eseguita: %d\n", row);
 
-        tmp = (tmp + (x[row] * matrixDiagonal[row])) / matrixDiagonal[row];
-        x[row] = tmp;
-    }
-    //printf("fine thread #%d\n", (blockIdx.x*blockDim.x + threadIdx.x));
-}
-
-//da pensare come ottimizzare
-__global__ void backwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, bool *modified, float *matrixDiagonal)
-{
-    const int row1 = num_rows - 1 - (blockIdx.x*blockDim.x + threadIdx.x)*RPT;
-    const int rowEnd = row1 + RPT;
-    if(row1>=0 && rowEnd<num_rows){
-        int row = 0;
-        for(row = rowEnd; row>=row1; row--){
             float tmp = x[row];
             const int row_start = row_ptr[row];
             const int row_end = row_ptr[row+1];
@@ -204,6 +187,43 @@ __global__ void backwardSweep(const int *row_ptr, const int *col_ind, const floa
             process = true;
             while(process){
                 if(row == (num_rows-1) || modified[row+1]==true){
+                    tmp += x[row] * matrixDiagonal[row];
+                    x[row] = tmp / matrixDiagonal[row];
+                    modified[row] = true;
+                    process = false;
+                }
+            }
+        }
+    }
+    printf("fine thread #%d\n", (blockIdx.x*blockDim.x + threadIdx.x));
+}
+
+//da pensare come ottimizzare
+__global__ void backwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, bool *modified, float *matrixDiagonal)
+{
+    const int row1 = num_rows - 1 - (blockIdx.x*blockDim.x + threadIdx.x)*RPT;
+    const int rowLast = row1 + RPT;
+    if(row1>=0 && row1<num_rows){ //non consideri se rimane a metà
+        int row = 0;
+        for(row = rowLast; row>=row1; row--){
+            float tmp = x[row];
+            const int row_start = row_ptr[row];
+            const int row_end = row_ptr[row+1];
+            bool process;
+
+            for(int col = row_start; col < row_end; col++){
+                process = true;
+                while(process){
+                    if(modified[col_ind[col]]==true || col_ind[col]<=row){
+                        tmp -= values[col]*x[col_ind[col]];
+                        process = false;
+                    }
+                }
+            }
+
+            process = true;
+            while(process){
+                if(row == 0 || modified[row+1]==true){
                     tmp += x[row] * matrixDiagonal[row];
                     x[row] = tmp / matrixDiagonal[row];
                     modified[row] = true;
@@ -287,7 +307,7 @@ int main(int argc, const char *argv[])
     CHECK(cudaMemcpy(d_values, values,  num_vals * sizeof(float), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_matrixDiagonal, matrixDiagonal,  num_rows * sizeof(float), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_x, x,  num_rows * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK(cudaMemset(d_modified, 0, num_rows * sizeof(double)));
+//    CHECK(cudaMemset(d_modified, 0, num_rows * sizeof(double)));
 
     printf("GPU START\n");
     start_time = get_time();

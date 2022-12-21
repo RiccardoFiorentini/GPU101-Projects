@@ -181,13 +181,13 @@ __global__ void forwardSweep(const int *row_ptr, const int *col_ind, const float
             modified[row] = 1;
             printf("CR%d\n", row);
         }else{
-            (*finish) = 0;
+            (*finish) = 0; //VARIABILE CHE NON SI MODIFICA O NON VIENE PASSATA BENE ALL'HOST DOPO -----------------
         }
     }
     __syncthreads();   
 }
 
-//da pensare come ottimizzare
+//Non ancora implementato in modo generico, funziona solo per triangolari inferiori
 __global__ void backwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *y, float *matrixDiagonal)
 {
     const int row = blockIdx.x*blockDim.x + threadIdx.x;
@@ -244,7 +244,7 @@ int main(int argc, const char *argv[])
     int *d_finish;
 
     CHECK(cudaMalloc(&d_finish, sizeof(int)));
-    CHECK(cudaMemset(d_finish, 1, sizeof(int)));
+    CHECK(cudaMemset(d_finish, 1, sizeof(int)));//set che non funziona -------------------
  
     //allocazione memoria per vettori su gpu
     CHECK(cudaMalloc(&d_row_ptr, (num_rows + 1) * sizeof(int)));
@@ -264,20 +264,21 @@ int main(int argc, const char *argv[])
     CHECK(cudaMemcpy(d_x, x,  num_rows * sizeof(float), cudaMemcpyHostToDevice));
 
     int countCicle = 0;
-    int *checker = (int *)malloc(num_rows * sizeof(int));
+    //int *checker = (int *)malloc(num_rows * sizeof(int));
     printf("GPU START\n");
     start_time = get_time();
     dim3 blocksPerGrid(num_rows/1024, 1, 1);
     dim3 ThreadsPerBlock(1024, 1, 1);
     while(finish == 0){
-        CHECK(cudaMemset(d_finish, 1, sizeof(int)));
+        CHECK(cudaMemset(d_finish, 1, sizeof(int))); //Set che non mette a uno la variabile ----------------------------
         forwardSweep<<<blocksPerGrid, ThreadsPerBlock>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_y, d_modified, d_matrixDiagonal, d_finish);
         CHECK_KERNELCALL();
         cudaDeviceSynchronize();
         CHECK(cudaMemcpy(&finish, d_finish, sizeof(int), cudaMemcpyDeviceToHost));
         countCicle++;
-        printf("end forwardSweep #%d, with finish = %d\n", countCicle, finish);
+        printf("end forwardSweep #%d, with finish = %d\n", countCicle, finish); //stampa di controllo per vedere quante volte è stato chiamato il kernel
         CHECK(cudaMemcpy(checker, d_modified, sizeof(int)*num_rows, cudaMemcpyDeviceToHost));
+        //Codice di controllo per vedere quante righe sono state risolte
         //int j = 0;
         //for(int i=0; i<num_rows; i++){
         //    if(checker[i] == 0){
@@ -314,6 +315,7 @@ int main(int argc, const char *argv[])
     // Print time
     printf("SYMGS Time CPU: %.10lf\n", end_time - start_time);
 
+    //controllo numero di errori
  /*    int count = 0;
 
    for(int i = 0; i<num_rows; i++){

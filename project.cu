@@ -137,7 +137,7 @@ void symgs_csr_sw(const int *row_ptr, const int *col_ind, const float *values, c
         x[i] = sum / currentDiagonal;
     }
 
-    // backward sweep
+    //backward sweep
     for (int i = num_rows - 1; i >= 0; i--)
     {
         float sum = x[i];
@@ -155,52 +155,75 @@ void symgs_csr_sw(const int *row_ptr, const int *col_ind, const float *values, c
     }
 }
 
-//implementation of the forward sweep single iteration, it compute all the line that are indipendent at it's iterated in the main
+// GPU implementation of the forward sweep single iteration, it compute all the line that are indipendent at the moment of the call
 __global__ void forwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *y, int *modified, float *matrixDiagonal, int* finish)
-{
+{ 
     const int row = blockIdx.x*blockDim.x + threadIdx.x;
-    if((row<num_rows) && modified[col_ind[row]==0]){
+    if((row<num_rows) && modified[row]==0){
         float tmp = x[row];
         const int row_start = row_ptr[row];
         const int row_end = row_ptr[row+1];
         bool done = true;
+        //compute all values computable of a single row, if it can't compute all the row it skip the cycles left and doesn't save the changes
         for(int col = row_start; (col < row_end) && done; col++){
             if(col_ind[col]>=row){
                 tmp -= values[col]*x[col_ind[col]];
-            }else{
-                if(modified[col_ind[col]]==1){
-                    tmp -= values[col]*y[col_ind[col]];
-                }else{
-                    done = false;
-                }
+            }else if(modified[col_ind[col]]==1){
+                tmp -= values[col]*y[col_ind[col]];
+            }else if(modified[col_ind[col]]==0){
+                    done = false;    
             }
         }
         if(done){
             tmp += x[row] * matrixDiagonal[row];
             y[row] = tmp / matrixDiagonal[row];
             modified[row] = 1;
-            printf("CR%d\n", row);
         }else{
-            (*finish) = 0;
+            finish[0] = 0;
         }
-    }
+   }
     __syncthreads();   
 }
 
-//da pensare come ottimizzare
-__global__ void backwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *y, float *matrixDiagonal)
+// GPU implementation of the backward sweep single iteration, it compute all the line that are indipendent at the moment of the call
+__global__ void backwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *y, float *matrixDiagonal, int *modified, int *finish)
 {
     const int row = blockIdx.x*blockDim.x + threadIdx.x;
-    if(row<num_rows){
+    if((row<num_rows) && modified[row]==1){
         float tmp = y[row];
         const int row_start = row_ptr[row];
         const int row_end = row_ptr[row+1];
-        for(int col = row_start; col < row_end; col++){
-            tmp -= values[col]*y[col_ind[col]];
+        bool done = true;
+        for(int col = row_start; (col < row_end) && done; col++){
+            if(col_ind[col]<=row){
+                tmp -= values[col]*y[col_ind[col]];
+            }else if(modified[col_ind[col]]==0){
+                tmp -= values[col]*x[col_ind[col]];
+            }else if(modified[col_ind[col]]==1){
+                    done = false;    
+            }
         }
-        tmp += y[row] * matrixDiagonal[row];
-        x[row] = tmp / matrixDiagonal[row];
+        if(done){
+            tmp += y[row] * matrixDiagonal[row];
+            x[row] = tmp / matrixDiagonal[row];
+            modified[row] = 0;
+        }else{
+            finish[0] = 0;
+        }
     }
+
+//Since the matrix is an inferior diagonal matrix i can make a more compact version of the backward due to the absence of dependences
+//    const int row = blockIdx.x*blockDim.x + threadIdx.x;
+//    if(row<num_rows){
+//        float tmp = y[row];
+//        const int row_start = row_ptr[row];
+//        const int row_end = row_ptr[row+1];
+//        for(int col = row_start; col < row_end; col++){
+//            tmp -= values[col]*y[col_ind[col]];
+//        }
+//        tmp += y[row] * matrixDiagonal[row];
+//        x[row] = tmp / matrixDiagonal[row];
+//    }
     __syncthreads();
 }
 
@@ -226,6 +249,10 @@ int main(int argc, const char *argv[])
     read_matrix(&row_ptr, &col_ind, &values, &matrixDiagonal, filename, &num_rows, &num_cols, &num_vals);
     float *x = (float *)malloc(num_rows * sizeof(float));
     printf("END reading matrix\n");
+
+    //To fix read_matrix building of the col_ind array
+    col_ind[num_vals-1] = num_rows - 1; 
+
     //Generate a random vector
     srand(time(NULL));
     for (int i = 0; i < num_rows; i++)
@@ -243,10 +270,10 @@ int main(int argc, const char *argv[])
     int *d_modified;
     int *d_finish;
 
+    const int setter = 1;
+
+    //GPU memory allocation
     CHECK(cudaMalloc(&d_finish, sizeof(int)));
-    CHECK(cudaMemset(d_finish, 1, sizeof(int)));
- 
-    //allocazione memoria per vettori su gpu
     CHECK(cudaMalloc(&d_row_ptr, (num_rows + 1) * sizeof(int)));
     CHECK(cudaMalloc(&d_col_ind, num_vals * sizeof(int)));
     CHECK(cudaMalloc(&d_values, num_vals * sizeof(float)));
@@ -255,45 +282,41 @@ int main(int argc, const char *argv[])
     CHECK(cudaMalloc(&d_y, num_rows * sizeof(float)));
     CHECK(cudaMalloc(&d_modified, num_rows * sizeof(int)));
 
-    //copia e inizializzazione vettori su gpu
-    CHECK(cudaMemset(d_modified, false, num_rows * sizeof(int)));
+    //GPU memory initialization
+    CHECK(cudaMemcpy(d_finish, &setter, sizeof(int), cudaMemcpyHostToDevice));
+    CHECK(cudaMemset(d_modified, 0, num_rows * sizeof(int)));
     CHECK(cudaMemcpy(d_row_ptr, row_ptr,  (num_rows + 1) * sizeof(int), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_col_ind, col_ind,  num_vals * sizeof(int), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_values, values,  num_vals * sizeof(float), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_matrixDiagonal, matrixDiagonal,  num_rows * sizeof(float), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_x, x,  num_rows * sizeof(float), cudaMemcpyHostToDevice));
 
-    int countCicle = 0;
-    int *checker = (int *)malloc(num_rows * sizeof(int));
+    //GPU code execution
     printf("GPU START\n");
     start_time = get_time();
-    dim3 blocksPerGrid(num_rows/1024, 1, 1);
+    dim3 blocksPerGrid(ceil(num_rows/1024)+1, 1, 1);
     dim3 ThreadsPerBlock(1024, 1, 1);
+    //forward sweep
     while(finish == 0){
-        CHECK(cudaMemset(d_finish, 1, sizeof(int)));
+        CHECK(cudaMemcpy(d_finish, &setter, sizeof(int), cudaMemcpyHostToDevice));
         forwardSweep<<<blocksPerGrid, ThreadsPerBlock>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_y, d_modified, d_matrixDiagonal, d_finish);
-        CHECK_KERNELCALL();
         cudaDeviceSynchronize();
+        CHECK_KERNELCALL();
         CHECK(cudaMemcpy(&finish, d_finish, sizeof(int), cudaMemcpyDeviceToHost));
-        countCicle++;
-        printf("end forwardSweep #%d, with finish = %d\n", countCicle, finish);
-        CHECK(cudaMemcpy(checker, d_modified, sizeof(int)*num_rows, cudaMemcpyDeviceToHost));
-        //int j = 0;
-        //for(int i=0; i<num_rows; i++){
-        //    if(checker[i] == 0){
-        //        j++;
-        //    }
-        //}
-        //printf("rimangono #%d righe da eseguire\n", j);
     }
-    printf("start backward sweep\n");
-    backwardSweep<<<blocksPerGrid, ThreadsPerBlock>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_y, d_matrixDiagonal);
-    CHECK_KERNELCALL();
-    cudaDeviceSynchronize();
+    //backward sweep
+    finish = 0;
+    while(finish == 0){
+        CHECK(cudaMemcpy(d_finish, &setter, sizeof(int), cudaMemcpyHostToDevice));
+        backwardSweep<<<blocksPerGrid, ThreadsPerBlock>>>(d_row_ptr, d_col_ind, d_values, num_rows, d_x, d_y, d_matrixDiagonal, d_modified, d_finish);
+        cudaDeviceSynchronize();
+        CHECK_KERNELCALL();
+        CHECK(cudaMemcpy(&finish, d_finish, sizeof(int), cudaMemcpyDeviceToHost));
+    }
     end_time = get_time();
     printf("SYMGS Time GPU: %.10lf\n", end_time - start_time);
 
-    //creo vettore di supporto per il testing e copio il risultato della gpu
+    //creation of a new vector to verify the number of "errors" and the gratest offset generated from GPU and CPU
     float *y = (float *)malloc(num_rows * sizeof(float));
     cudaMemcpy(y, d_x,  num_rows * sizeof(float), cudaMemcpyDeviceToHost);
 
@@ -305,26 +328,33 @@ int main(int argc, const char *argv[])
     cudaFree(d_y);
     cudaFree(d_modified);
     cudaFree(d_finish);
+    
 
-    // Compute in sw
+    //CPU computation
     start_time = get_time();
     symgs_csr_sw(row_ptr, col_ind, values, num_rows, x, matrixDiagonal);
     end_time = get_time();
 
-    // Print time
+    // Print CPU time
     printf("SYMGS Time CPU: %.10lf\n", end_time - start_time);
 
- /*    int count = 0;
-
-   for(int i = 0; i<num_rows; i++){
-        if(y[i] - x[i] > 0.0001){
+    //check offsets
+    int count = 0;
+    float maxOffset = 0;
+    float valAssoc = 0;
+    float relativeOff = 0;
+    for(int i = 0; i<num_rows; i++){
+        if(fabs(y[i] - x[i]) > 0.0001 && fabs((y[i] - x[i])/x[i]) > 0.001){
             count++;
-            printf("Error line %d with offset = %f\n", i, y[i] - x[i]);
+            if(maxOffset<fabs(y[i] - x[i])){
+                maxOffset = y[i] - x[i];
+                valAssoc = x[i];
+                relativeOff = (y[i] - x[i])/x[i];
+            }
         }
     }
- */ 
 
-    //printf("Num Errors = %d\n", count);
+    printf("Num Errors = %d with max erro = %f with value of %f and relative error of %f\n", count, maxOffset, valAssoc, relativeOff);
    
     free(row_ptr);
     free(col_ind);

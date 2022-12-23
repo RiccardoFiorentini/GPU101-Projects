@@ -47,6 +47,7 @@ int main(int argc, const char *argv[])
     const int setter = 1;
 
     int *d_finish;
+    int *d_finish;
 
     CHECK(cudaMalloc(&d_finish, sizeof(int)));
     CHECK(cudaMemcpy(d_finish, &setter, sizeof(int), cudaMemcpyHostToDevice));

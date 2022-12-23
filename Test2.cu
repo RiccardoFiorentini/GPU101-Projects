@@ -24,6 +24,25 @@
         exit(EXIT_FAILURE);                                                           \
     }                                                                                 \
 }
+#define CHECK(call)                                                                       \
+{                                                                                     \
+    const cudaError_t err = call;                                                     \
+    if (err != cudaSuccess)                                                           \
+    {                                                                                 \
+        printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__); \
+        exit(EXIT_FAILURE);                                                           \
+    }                                                                                 \
+}
+ 
+#define CHECK_KERNELCALL()                                                                \
+{                                                                                     \
+    const cudaError_t err = cudaGetLastError();                                       \
+    if (err != cudaSuccess)                                                           \
+    {                                                                                 \
+        printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__); \
+        exit(EXIT_FAILURE);                                                           \
+    }                                                                                 \
+}
 
 double get_time() // function to get the time of day in seconds
 {
@@ -114,6 +133,7 @@ void read_matrix(int **row_ptr, int **col_ind, float **values, float **matrixDia
     *values = values_t;
     *matrixDiagonal = matrixDiagonal_t;
 }
+
 
 // CPU implementation of SYMGS using CSR, DO NOT CHANGE THIS
 void symgs_csr_sw(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *matrixDiagonal)
@@ -234,7 +254,7 @@ int main(int argc, const char *argv[])
     }
 
     //CPU vaiables
-    int *row_ptr, *col_ind, num_rows, num_cols, num_vals;
+    int *row_ptr, *col_ind, num_rows,  num_vals;
     float *values;
     float *matrixDiagonal;
     int finish = 0;
@@ -243,8 +263,46 @@ int main(int argc, const char *argv[])
 
     double start_time, end_time;
 
-    //lettuta matrice e inizializzazione variabili
-    read_matrix(&row_ptr, &col_ind, &values, &matrixDiagonal, filename, &num_rows, &num_cols, &num_vals);
+	char tmp[100];
+	int i;
+	
+	FILE* mat;
+	mat=fopen(filename,"r");
+	
+	fgets(tmp,99,mat);
+	fscanf(mat,"%d\n",&num_rows);
+	fgets(tmp,99,mat);
+	fscanf(mat,"%d\n",&num_vals);
+	
+	col_ind = (int*)malloc(sizeof(int)*num_vals);
+	row_ptr = (int*)malloc(sizeof(int)*(num_rows+1));
+	matrixDiagonal = (float*)malloc(sizeof(float)*num_rows);
+	values = (float*)malloc(sizeof(float)*num_vals);
+	
+	fgets(tmp,99,mat);
+	for(i=0;i<num_rows;i++){
+		fscanf(mat,"%d\n",&row_ptr[i]);
+	}
+	row_ptr[i]=num_vals;
+	
+	fgets(tmp,99,mat);
+	for(i=0;i<num_vals;i++){
+		fscanf(mat,"%d\n",&col_ind[i]);
+	}
+	
+	fgets(tmp,99,mat);
+	for(i=0;i<num_rows;i++){
+		fscanf(mat,"%f\n",&matrixDiagonal[i]);
+	}
+	
+	fgets(tmp,99,mat);
+	for(i=0;i<num_vals;i++){
+		fscanf(mat,"%f\n",&values[i]);
+	}
+	printf("END READ\n");
+
+    ////lettuta matrice e inizializzazione variabili
+    //read_matrix(&row_ptr, &col_ind, &values, &matrixDiagonal, filename, &num_rows, &num_cols, &num_vals);
     float *x = (float *)malloc(num_rows * sizeof(float));
     printf("END reading matrix\n");
 
@@ -274,6 +332,13 @@ int main(int argc, const char *argv[])
     //CHECK(cudaMemset((int *)d_finish, 1, sizeof(int)));//set che non funziona -------------------
  
     //allocazione memoria per vettori su gpu
+    CHECK(cudaMalloc(&d_row_ptr, (num_rows + 1) * sizeof(int)));
+    CHECK(cudaMalloc(&d_col_ind, num_vals * sizeof(int)));
+    CHECK(cudaMalloc(&d_values, num_vals * sizeof(float)));
+    CHECK(cudaMalloc(&d_matrixDiagonal, num_rows * sizeof(float)));
+    CHECK(cudaMalloc(&d_x, num_rows * sizeof(float)));
+    CHECK(cudaMalloc(&d_y, num_rows * sizeof(float)));
+    CHECK(cudaMalloc(&d_modified, num_rows * sizeof(int)));
     CHECK(cudaMalloc(&d_row_ptr, (num_rows + 1) * sizeof(int)));
     CHECK(cudaMalloc(&d_col_ind, num_vals * sizeof(int)));
     CHECK(cudaMalloc(&d_values, num_vals * sizeof(float)));
@@ -350,6 +415,8 @@ int main(int argc, const char *argv[])
     cudaFree(d_matrixDiagonal);
     cudaFree(d_x);
     cudaFree(d_y);
+    cudaFree(d_modified);
+    cudaFree(d_finish);
     cudaFree(d_modified);
     cudaFree(d_finish);
 

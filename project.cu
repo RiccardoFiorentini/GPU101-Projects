@@ -158,6 +158,7 @@ void symgs_csr_sw(const int *row_ptr, const int *col_ind, const float *values, c
 // GPU implementation of the forward sweep single iteration, it compute all the line that are indipendent at the moment of the call
 __global__ void forwardSweep(const int *row_ptr, const int *col_ind, const float *values, const int num_rows, float *x, float *y, int *modified, float *matrixDiagonal, int* finish)
 { 
+{ 
     const int row = blockIdx.x*blockDim.x + threadIdx.x;
     if((row<num_rows) && modified[row]==0){
         float tmp = x[row];

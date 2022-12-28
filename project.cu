@@ -237,8 +237,8 @@ int main(int argc, const char *argv[])
 
     //CPU vaiables
     int *row_ptr, *col_ind, num_rows, num_cols, num_vals;
-    float *values;
-    float *matrixDiagonal;
+    float *values, *matrixDiagonal;
+
     int finish = 0;
 
     const char *filename = argv[1];

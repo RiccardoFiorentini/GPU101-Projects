@@ -248,7 +248,6 @@ int main(int argc, const char *argv[])
     //lettuta matrice e inizializzazione variabili
     read_matrix(&row_ptr, &col_ind, &values, &matrixDiagonal, filename, &num_rows, &num_cols, &num_vals);
     float *x = (float *)malloc(num_rows * sizeof(float));
-    printf("END reading matrix\n");
 
     //To fix read_matrix building of the col_ind array
     col_ind[num_vals-1] = num_rows - 1; 
@@ -259,8 +258,6 @@ int main(int argc, const char *argv[])
     {
         x[i] = (rand() % 100) / (rand() % 100 + 1); // the number we use to divide cannot be 0, that's the reason of the +1
     }
-    
-    printf("X generated\n");
 
     //GPU vaiables
     int *d_row_ptr, *d_col_ind;
@@ -292,7 +289,6 @@ int main(int argc, const char *argv[])
     CHECK(cudaMemcpy(d_x, x,  num_rows * sizeof(float), cudaMemcpyHostToDevice));
 
     //GPU code execution
-    printf("GPU START\n");
     start_time = get_time();
     dim3 blocksPerGrid(ceil(num_rows/1024)+1, 1, 1);
     dim3 ThreadsPerBlock(1024, 1, 1);
@@ -329,7 +325,6 @@ int main(int argc, const char *argv[])
     cudaFree(d_modified);
     cudaFree(d_finish);
     
-
     //CPU computation
     start_time = get_time();
     symgs_csr_sw(row_ptr, col_ind, values, num_rows, x, matrixDiagonal);
@@ -338,24 +333,6 @@ int main(int argc, const char *argv[])
     // Print CPU time
     printf("SYMGS Time CPU: %.10lf\n", end_time - start_time);
 
-    //check offsets
-    int count = 0;
-    float maxOffset = 0;
-    float valAssoc = 0;
-    float relativeOff = 0;
-    for(int i = 0; i<num_rows; i++){
-        if(fabs(y[i] - x[i]) > 0.0001 && fabs((y[i] - x[i])/x[i]) > 0.001){
-            count++;
-            if(maxOffset<fabs(y[i] - x[i])){
-                maxOffset = y[i] - x[i];
-                valAssoc = x[i];
-                relativeOff = (y[i] - x[i])/x[i];
-            }
-        }
-    }
-
-    printf("Num Errors = %d with max erro = %f with value of %f and relative error of %f\n", count, maxOffset, valAssoc, relativeOff);
-   
     free(row_ptr);
     free(col_ind);
     free(values);
